@@ -34,20 +34,20 @@ function readFileAsBase64(file) {
 }
 
 /**
- * Native <dialog> modal for generating 4-choice flashcards from study notes,
- * PDF documents (.pdf), Word documents (.docx/.doc), or text files (.txt/.md).
+ * Native <dialog> modal for generating 4-choice flashcards from any study material:
+ * PDF documents (.pdf), Word documents (.docx/.doc), text files (.txt/.md), or pasted notes.
  *
  * @param {Object} props
  * @param {React.RefObject<HTMLDialogElement>} props.dialogRef - Ref to the native <dialog> element
- * @param {Function} props.onQuestionsGenerated - (newQuestions: Array, topicToSelect: string) => void
- * @param {number} props.customCount - Number of custom AI cards currently saved
- * @param {Function} props.onClearCustomCards - () => void
+ * @param {Function} props.onDeckCreated - (newDeck: { id, title, questions }) => void
+ * @param {number} props.customDeckCount - Number of custom decks currently saved
+ * @param {Function} props.onClearAllDecks - () => void
  */
 export function NotesGeneratorModal({
   dialogRef,
-  onQuestionsGenerated,
-  customCount,
-  onClearCustomCards
+  onDeckCreated,
+  customDeckCount,
+  onClearAllDecks
 }) {
   const [notesText, setNotesText] = useState('');
   const [attachedPdf, setAttachedPdf] = useState(null);
@@ -105,7 +105,7 @@ export function NotesGeneratorModal({
     setIsReadingFile(true);
 
     const lowerName = file.name.toLowerCase();
-    const cleanTopic = file.name.replace(/\.[^/.]+$/, '');
+    const cleanTitle = file.name.replace(/\.[^/.]+$/, '');
 
     try {
       // 1. PDF files (.pdf) — passed natively to Gemini as a multimodal document
@@ -117,7 +117,7 @@ export function NotesGeneratorModal({
           base64Data
         });
         if (!topicName.trim()) {
-          setTopicName(`Notes: ${cleanTopic}`);
+          setTopicName(cleanTitle);
         }
       }
       // 2. Word documents (.docx or .doc) — extract text via mammoth
@@ -156,7 +156,7 @@ export function NotesGeneratorModal({
         );
         setImportedDocName(file.name);
         if (!topicName.trim()) {
-          setTopicName(`Notes: ${cleanTopic}`);
+          setTopicName(cleanTitle);
         }
       }
       // 3. Plain text files (.txt, .md, .csv, etc.)
@@ -165,7 +165,7 @@ export function NotesGeneratorModal({
         setNotesText((prev) => (prev ? `${prev}\n\n${text}` : text));
         setImportedDocName(file.name);
         if (!topicName.trim()) {
-          setTopicName(`Notes: ${cleanTopic}`);
+          setTopicName(cleanTitle);
         }
       }
     } catch (err) {
@@ -194,7 +194,7 @@ export function NotesGeneratorModal({
         localStorage.setItem(STORAGE_KEY_API, customApiKey.trim());
       }
 
-      const generated = await generateQuestionsFromNotes({
+      const { deckTitle, questions } = await generateQuestionsFromNotes({
         notesText,
         pdfDocument: attachedPdf,
         topicName,
@@ -205,10 +205,11 @@ export function NotesGeneratorModal({
         apiKey: customApiKey.trim() || undefined
       });
 
-      const uniqueTopics = new Set(generated.map((q) => q.topic));
-      const targetTopic =
-        uniqueTopics.size === 1 ? generated[0].topic : 'All Topics';
-      onQuestionsGenerated(generated, targetTopic);
+      onDeckCreated({
+        id: `deck-${Date.now()}`,
+        title: deckTitle,
+        questions
+      });
 
       // Reset form and close modal
       setNotesText('');
@@ -248,11 +249,11 @@ export function NotesGeneratorModal({
               <Sparkles size={18} />
             </span>
             <div>
-              <h2 id="ai-notes-dialog-title">AI Study Notes Generator</h2>
+              <h2 id="ai-notes-dialog-title">Upload or Paste Study Material</h2>
               <p className="dialog-subtitle">
-                Upload a <strong>PDF</strong>, <strong>Word (.docx)</strong>, or{' '}
-                <strong>Text</strong> file — Gemini touches on every area and
-                shuffles the quiz.
+                Send in any <strong>PDF</strong>, <strong>Word (.docx)</strong>,{' '}
+                <strong>Text file</strong>, or pasted notes — Gemini builds a
+                complete, shuffled 4-choice revision deck.
               </p>
             </div>
           </div>
@@ -262,7 +263,7 @@ export function NotesGeneratorModal({
             className="dialog-close-btn"
             onClick={handleClose}
             disabled={isGenerating}
-            aria-label="Close AI Study Notes Generator"
+            aria-label="Close Study Material Generator"
           >
             <X size={18} aria-hidden="true" />
           </button>
@@ -272,13 +273,13 @@ export function NotesGeneratorModal({
           <div className="form-row-two">
             <div className="form-field">
               <label htmlFor="notes-topic-input">
-                Topic / Course Name <span className="optional-tag">(Optional)</span>
+                Subject / Material Name <span className="optional-tag">(Optional)</span>
               </label>
               <input
                 id="notes-topic-input"
                 type="text"
                 className="dialog-input"
-                placeholder="e.g. Week 5: Marketing Mix"
+                placeholder="e.g. Biology Ch. 4, Contract Law, Algorithms..."
                 value={topicName}
                 onChange={(e) => setTopicName(e.target.value)}
                 disabled={isGenerating}
@@ -308,7 +309,7 @@ export function NotesGeneratorModal({
           <div className="form-field">
             <div className="label-with-action">
               <label htmlFor="raw-notes-textarea">
-                Your Study Notes {attachedPdf ? '(Optional extra instructions)' : ''}
+                Study Material {attachedPdf ? '(Optional extra instructions)' : ''}
               </label>
               <label htmlFor="notes-file-upload" className="upload-file-btn">
                 {isReadingFile ? (
@@ -319,7 +320,7 @@ export function NotesGeneratorModal({
                 ) : (
                   <>
                     <Upload size={13} aria-hidden="true" />
-                    Upload PDF, Word (.docx), or TXT
+                    Choose PDF, Word (.docx), or TXT
                   </>
                 )}
                 <input
@@ -360,7 +361,7 @@ export function NotesGeneratorModal({
                 <FileCheck2 size={16} className="file-pill-icon" aria-hidden="true" />
                 <div className="file-pill-info">
                   <strong>Extracted from {importedDocName}</strong>
-                  <span>You can edit the extracted notes below before generating</span>
+                  <span>You can review or edit the extracted text below</span>
                 </div>
                 <button
                   type="button"
@@ -376,7 +377,7 @@ export function NotesGeneratorModal({
             <span id="notes-hint" className="field-hint">
               {attachedPdf
                 ? 'Your PDF is ready! Click Generate below, or type extra focus instructions here.'
-                : 'Upload a .pdf / .docx / .txt file above, or paste your lecture notes directly below.'}
+                : 'Upload any .pdf, .docx, or .txt document above, or paste your study material directly below.'}
             </span>
             <textarea
               id="raw-notes-textarea"
@@ -385,8 +386,8 @@ export function NotesGeneratorModal({
               aria-describedby="notes-hint"
               placeholder={
                 attachedPdf
-                  ? 'Optional: Add any specific instructions for your PDF (e.g. "Cover all chapters and definitions")...'
-                  : 'Paste your study notes here, or click "Upload PDF, Word (.docx), or TXT" above...'
+                  ? 'Optional: Add any specific instructions for your PDF (e.g. "Focus on formulas and key definitions")...'
+                  : 'Paste any lecture notes, textbook chapters, or study guides here — or click "Choose PDF, Word (.docx), or TXT" above...'
               }
               value={notesText}
               onChange={(e) => setNotesText(e.target.value)}
@@ -404,7 +405,7 @@ export function NotesGeneratorModal({
                 {customApiKey.trim()
                   ? 'Using custom Gemini API key'
                   : hasEnvKey
-                    ? 'Gemini API key configured (.env.local)'
+                    ? 'Gemini API key configured'
                     : 'No API key detected'}
               </span>
               <button
@@ -445,20 +446,20 @@ export function NotesGeneratorModal({
           </div>
 
           <div className="dialog-footer">
-            {customCount > 0 ? (
+            {customDeckCount > 0 ? (
               <button
                 type="button"
                 className="clear-custom-btn"
-                onClick={onClearCustomCards}
+                onClick={onClearAllDecks}
                 disabled={isGenerating}
               >
                 <Trash2 size={14} aria-hidden="true" />
-                Delete {customCount} Custom Card{customCount === 1 ? '' : 's'}
+                Delete All Saved Decks ({customDeckCount})
               </button>
             ) : (
               <span className="footer-note">
-                <FileText size={13} aria-hidden="true" /> Supports .pdf, .docx,
-                .doc, .txt &amp; .md
+                <FileText size={13} aria-hidden="true" /> Works with any PDF,
+                Word (.docx), or text handout
               </span>
             )}
 
@@ -479,13 +480,13 @@ export function NotesGeneratorModal({
                 {isGenerating ? (
                   <>
                     <Loader2 size={16} className="spin-loader" aria-hidden="true" />
-                    Generating Full Quiz...
+                    Building Your Quiz...
                   </>
                 ) : (
                   <>
                     <Sparkles size={16} aria-hidden="true" />
                     {questionCount === 'comprehensive'
-                      ? 'Generate All Questions'
+                      ? 'Generate Full Quiz'
                       : `Generate ${questionCount} Questions`}
                   </>
                 )}

@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
-import { quizQuestions, quizTopics } from './data/questions';
+import { quizQuestions as sampleQuestions } from './data/questions';
 import { Flashcard } from './components/Flashcard';
 import { NotesGeneratorModal } from './components/NotesGeneratorModal';
 import {
@@ -13,11 +13,16 @@ import {
   Search,
   Flame,
   Sparkles,
-  ListOrdered
+  ListOrdered,
+  Upload,
+  FolderOpen,
+  Trash2,
+  BookOpen
 } from 'lucide-react';
 import './App.css';
 
-const CUSTOM_QUESTIONS_STORAGE_KEY = 'quizflip_custom_questions';
+const SAVED_DECKS_STORAGE_KEY = 'quizflip_saved_decks';
+const LEGACY_CUSTOM_QUESTIONS_KEY = 'quizflip_custom_questions';
 
 /**
  * Seeded pseudo-random generator (Mulberry32) so shuffles are 100% pure inside useMemo
@@ -40,7 +45,6 @@ function createSeededRandom(seed) {
 function shuffleDeckAndOptions(questions, seed, shouldShuffleOrder = true) {
   const rng = createSeededRandom(seed);
 
-  // Shuffle the 4 options inside each question while keeping track of the right answer
   const cardsWithShuffledOptions = questions.map((q) => {
     const indices = [0, 1, 2, 3];
     for (let i = indices.length - 1; i > 0; i--) {
@@ -68,36 +72,65 @@ function shuffleDeckAndOptions(questions, seed, shouldShuffleOrder = true) {
   return deck;
 }
 
+function loadInitialDecks() {
+  try {
+    const savedRaw = localStorage.getItem(SAVED_DECKS_STORAGE_KEY);
+    if (savedRaw) {
+      const parsed = JSON.parse(savedRaw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+    // Migrate legacy custom questions if present
+    const legacyRaw = localStorage.getItem(LEGACY_CUSTOM_QUESTIONS_KEY);
+    if (legacyRaw) {
+      const legacyQuestions = JSON.parse(legacyRaw);
+      if (Array.isArray(legacyQuestions) && legacyQuestions.length > 0) {
+        const migrated = [
+          {
+            id: 'deck-migrated',
+            title: legacyQuestions[0]?.topic || 'My Study Notes',
+            questions: legacyQuestions
+          }
+        ];
+        localStorage.setItem(SAVED_DECKS_STORAGE_KEY, JSON.stringify(migrated));
+        return migrated;
+      }
+    }
+  } catch {
+    // Ignore storage read errors
+  }
+  return [];
+}
+
 function App() {
   const dialogRef = useRef(null);
 
-  // Custom AI-generated questions persisted in localStorage
-  const [customQuestions, setCustomQuestions] = useState(() => {
-    try {
-      const saved = localStorage.getItem(CUSTOM_QUESTIONS_STORAGE_KEY);
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
+  // User's uploaded/generated study decks
+  const [savedDecks, setSavedDecks] = useState(loadInitialDecks);
+  const [activeDeckId, setActiveDeckId] = useState(() => {
+    const initial = loadInitialDecks();
+    return initial[0]?.id || '';
   });
 
-  // Combined question bank (Custom AI cards + all 90 BBM 122 cards)
-  const allQuestions = useMemo(
-    () => [...customQuestions, ...quizQuestions],
-    [customQuestions]
+  // Currently selected deck object
+  const currentDeckObj = useMemo(() => {
+    return savedDecks.find((d) => d.id === activeDeckId) || savedDecks[0] || null;
+  }, [savedDecks, activeDeckId]);
+
+  const deckQuestions = useMemo(
+    () => currentDeckObj?.questions || [],
+    [currentDeckObj]
   );
 
-  // Dynamic topic list including any custom AI-generated topics
-  const allTopics = useMemo(() => {
-    const customTopicSet = new Set(customQuestions.map((q) => q.topic));
-    const uniqueCustomTopics = [...customTopicSet].filter(
-      (t) => !quizTopics.includes(t)
-    );
-    return ['All Topics', ...uniqueCustomTopics, ...quizTopics.slice(1)];
-  }, [customQuestions]);
+  // Dynamic section/topic list extracted solely from the active study material
+  const deckTopics = useMemo(() => {
+    const unique = new Set(deckQuestions.map((q) => q.topic).filter(Boolean));
+    return ['All Sections', ...unique];
+  }, [deckQuestions]);
 
-  // Filters & Shuffle State (Shuffled in a random sequence by default!)
-  const [selectedTopic, setSelectedTopic] = useState('All Topics');
+  // Filters & Shuffle State (Shuffled in a random sequence by default)
+  const [selectedTopic, setSelectedTopic] = useState('All Sections');
   const [searchQuery, setSearchQuery] = useState('');
   const [isShuffled, setIsShuffled] = useState(true);
   const [shuffleSeed, setShuffleSeed] = useState(() =>
@@ -112,9 +145,9 @@ function App() {
 
   // Build filtered & randomly shuffled deck
   const activeDeck = useMemo(() => {
-    const filtered = allQuestions.filter((q) => {
+    const filtered = deckQuestions.filter((q) => {
       const matchesTopic =
-        selectedTopic === 'All Topics' || q.topic === selectedTopic;
+        selectedTopic === 'All Sections' || q.topic === selectedTopic;
       const query = searchQuery.trim().toLowerCase();
       const matchesSearch =
         !query ||
@@ -130,7 +163,7 @@ function App() {
 
     return shuffleDeckAndOptions(filtered, shuffleSeed, isShuffled);
   }, [
-    allQuestions,
+    deckQuestions,
     selectedTopic,
     searchQuery,
     showMissedOnly,
@@ -148,8 +181,14 @@ function App() {
   const progressPercent =
     totalCards > 0 ? Math.round(((safeIndex + 1) / totalCards) * 100) : 0;
 
-  // Score calculations
-  const answeredIds = Object.keys(userAnswers);
+  // Score calculations for current deck
+  const deckCardIds = useMemo(
+    () => new Set(deckQuestions.map((q) => String(q.id))),
+    [deckQuestions]
+  );
+  const answeredIds = Object.keys(userAnswers).filter((id) =>
+    deckCardIds.has(String(id))
+  );
   const totalAnswered = answeredIds.length;
   const totalCorrect = answeredIds.filter((id) => userAnswers[id].isCorrect).length;
   const totalMissed = totalAnswered - totalCorrect;
@@ -194,28 +233,77 @@ function App() {
     dialogRef.current?.showModal();
   };
 
-  const handleQuestionsGenerated = (newQuestions, targetTopic) => {
-    setCustomQuestions((prev) => {
-      const updated = [...newQuestions, ...prev];
-      try {
-        localStorage.setItem(CUSTOM_QUESTIONS_STORAGE_KEY, JSON.stringify(updated));
-      } catch {
-        // Ignore storage quota errors
+  const persistDecks = (nextDecks) => {
+    setSavedDecks(nextDecks);
+    try {
+      if (nextDecks.length === 0) {
+        localStorage.removeItem(SAVED_DECKS_STORAGE_KEY);
+      } else {
+        localStorage.setItem(SAVED_DECKS_STORAGE_KEY, JSON.stringify(nextDecks));
       }
-      return updated;
-    });
-    setSelectedTopic(targetTopic || 'All Topics');
+    } catch {
+      // Ignore storage quota errors
+    }
+  };
+
+  const handleDeckCreated = (newDeck) => {
+    const updated = [newDeck, ...savedDecks];
+    persistDecks(updated);
+    setActiveDeckId(newDeck.id);
+    setSelectedTopic('All Sections');
     setSearchQuery('');
     setShowMissedOnly(false);
+    setUserAnswers({});
+    setStreak(0);
     setIsShuffled(true);
     setShuffleSeed((prev) => prev + Math.floor(Math.random() * 10000) + 1);
     setCurrentIndex(0);
   };
 
-  const handleClearCustomCards = () => {
-    setCustomQuestions([]);
-    localStorage.removeItem(CUSTOM_QUESTIONS_STORAGE_KEY);
-    setSelectedTopic('All Topics');
+  const handleLoadSampleDeck = () => {
+    const existingSample = savedDecks.find((d) => d.id === 'deck-sample');
+    if (existingSample) {
+      setActiveDeckId(existingSample.id);
+    } else {
+      const sampleDeck = {
+        id: 'deck-sample',
+        title: 'Sample Deck: Management Principles (90 Qs)',
+        questions: sampleQuestions
+      };
+      const updated = [sampleDeck, ...savedDecks];
+      persistDecks(updated);
+      setActiveDeckId(sampleDeck.id);
+    }
+    setSelectedTopic('All Sections');
+    setSearchQuery('');
+    setShowMissedOnly(false);
+    setUserAnswers({});
+    setStreak(0);
+    setIsShuffled(true);
+    setShuffleSeed((prev) => prev + Math.floor(Math.random() * 10000) + 1);
+    setCurrentIndex(0);
+  };
+
+  const handleDeleteActiveDeck = () => {
+    if (!currentDeckObj) return;
+    const remaining = savedDecks.filter((d) => d.id !== currentDeckObj.id);
+    persistDecks(remaining);
+    setActiveDeckId(remaining[0]?.id || '');
+    setSelectedTopic('All Sections');
+    setSearchQuery('');
+    setShowMissedOnly(false);
+    setUserAnswers({});
+    setStreak(0);
+    setCurrentIndex(0);
+  };
+
+  const handleClearAllDecks = () => {
+    persistDecks([]);
+    localStorage.removeItem(LEGACY_CUSTOM_QUESTIONS_KEY);
+    setActiveDeckId('');
+    setSelectedTopic('All Sections');
+    setUserAnswers({});
+    setStreak(0);
     setCurrentIndex(0);
     dialogRef.current?.close();
   };
@@ -254,7 +342,7 @@ function App() {
       <header className="app-header">
         <div className="header-top-bar">
           <div className="badge-pill">
-            <GraduationCap size={16} aria-hidden="true" /> QuizFlip • Study &amp; Revision
+            <GraduationCap size={16} aria-hidden="true" /> QuizFlip • AI Study &amp; Revision
           </div>
           <button
             type="button"
@@ -262,234 +350,311 @@ function App() {
             onClick={handleOpenAiModal}
           >
             <Sparkles size={15} aria-hidden="true" />
-            + AI Add Your Notes
+            + Upload / Paste Study Material
           </button>
         </div>
         <h1>QuizFlip</h1>
         <p className="subtitle">
-          {allQuestions.length} comprehensive 4-choice flashcards across every
-          topic — shuffled in random order for active recall.
+          Turn any PDF, Word document, or study notes into a shuffled 4-choice
+          revision quiz &amp; flashcard deck.
         </p>
       </header>
 
-      {/* Score & Study Stats Bar */}
-      <section className="stats-bar" aria-label="Study session statistics">
-        <div className="stat-item">
-          <span className="stat-label">Answered</span>
-          <span className="stat-value">
-            {totalAnswered} / {allQuestions.length}
-          </span>
-        </div>
-        <div className="stat-item">
-          <span className="stat-label">Correct</span>
-          <span className="stat-value stat-emerald">
-            <CheckCircle2 size={15} aria-hidden="true" />
-            {totalCorrect}
-          </span>
-        </div>
-        <div className="stat-item">
-          <span className="stat-label">Accuracy</span>
-          <span className="stat-value stat-cyan">{accuracyPercent}%</span>
-        </div>
-        <div className="stat-item">
-          <span className="stat-label">Streak</span>
-          <span className="stat-value stat-amber">
-            <Flame size={15} aria-hidden="true" />
-            {streak}
-          </span>
-        </div>
-      </section>
+      {currentDeckObj ? (
+        <>
+          {/* Active Study Material Switcher Bar */}
+          <section className="deck-switcher-bar" aria-label="Active study material">
+            <div className="deck-select-wrapper">
+              <FolderOpen size={16} className="deck-icon" aria-hidden="true" />
+              <label htmlFor="deck-select" className="visually-hidden">
+                Select Study Material Deck
+              </label>
+              <select
+                id="deck-select"
+                className="deck-select"
+                value={currentDeckObj.id}
+                onChange={(e) => {
+                  setActiveDeckId(e.target.value);
+                  setSelectedTopic('All Sections');
+                  setSearchQuery('');
+                  setShowMissedOnly(false);
+                  setCurrentIndex(0);
+                }}
+              >
+                {savedDecks.map((deck) => (
+                  <option key={deck.id} value={deck.id}>
+                    {deck.title} ({deck.questions.length} cards)
+                  </option>
+                ))}
+              </select>
+            </div>
 
-      {/* Toolbar: Topic Filter, Search, & Shuffle Controls */}
-      <section className="revision-toolbar" aria-label="Revision controls and filters">
-        <div className="toolbar-row">
-          <div className="filter-group">
-            <label htmlFor="topic-select" className="visually-hidden">
-              Filter by Course Topic
-            </label>
-            <select
-              id="topic-select"
-              className="topic-select"
-              value={selectedTopic}
-              onChange={(e) => {
-                setSelectedTopic(e.target.value);
-                setCurrentIndex(0);
-              }}
-            >
-              {allTopics.map((topic) => (
-                <option key={topic} value={topic}>
-                  {topic}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="search-group">
-            <Search size={15} className="search-icon" aria-hidden="true" />
-            <label htmlFor="concept-search" className="visually-hidden">
-              Search notes or concepts
-            </label>
-            <input
-              id="concept-search"
-              type="search"
-              className="search-input"
-              placeholder="Search any topic (e.g. Mintzberg, Fayol, MBO)..."
-              value={searchQuery}
-              onChange={(e) => {
-                setSearchQuery(e.target.value);
-                setCurrentIndex(0);
-              }}
-            />
-          </div>
-        </div>
-
-        <div className="toolbar-toggles">
-          <button
-            type="button"
-            className="toggle-chip active"
-            onClick={handleReshuffle}
-          >
-            <Shuffle size={14} aria-hidden="true" />
-            Reshuffle Random Order
-          </button>
-
-          <button
-            type="button"
-            className={`toggle-chip ${!isShuffled ? 'active' : ''}`}
-            onClick={() => {
-              setIsShuffled((prev) => !prev);
-              setCurrentIndex(0);
-            }}
-            aria-pressed={!isShuffled}
-          >
-            <ListOrdered size={14} aria-hidden="true" />
-            {isShuffled ? 'Switch to Topic Order' : 'In Topic Order'}
-          </button>
-
-          {totalMissed > 0 && (
             <button
               type="button"
-              className={`toggle-chip missed-chip ${showMissedOnly ? 'active' : ''}`}
-              onClick={() => {
-                setShowMissedOnly((prev) => !prev);
-                setCurrentIndex(0);
-              }}
-              aria-pressed={showMissedOnly}
+              className="delete-deck-btn"
+              onClick={handleDeleteActiveDeck}
+              aria-label={`Remove ${currentDeckObj.title}`}
             >
-              <AlertCircle size={14} aria-hidden="true" />
-              Review Missed ({totalMissed})
+              <Trash2 size={14} aria-hidden="true" />
+              Remove Deck
             </button>
-          )}
-        </div>
-      </section>
+          </section>
 
-      {/* Progress Bar */}
-      <div className="progress-section">
-        <div className="progress-info">
-          <span>
-            Deck Progress ({totalCards > 0 ? safeIndex + 1 : 0} of {totalCards})
-          </span>
-          <span className="progress-value">{progressPercent}%</span>
-        </div>
-        <div className="progress-track">
-          <div
-            className="progress-fill"
-            style={{ width: `${progressPercent}%` }}
-          />
-        </div>
-      </div>
+          {/* Score & Study Stats Bar */}
+          <section className="stats-bar" aria-label="Study session statistics">
+            <div className="stat-item">
+              <span className="stat-label">Answered</span>
+              <span className="stat-value">
+                {totalAnswered} / {deckQuestions.length}
+              </span>
+            </div>
+            <div className="stat-item">
+              <span className="stat-label">Correct</span>
+              <span className="stat-value stat-emerald">
+                <CheckCircle2 size={15} aria-hidden="true" />
+                {totalCorrect}
+              </span>
+            </div>
+            <div className="stat-item">
+              <span className="stat-label">Accuracy</span>
+              <span className="stat-value stat-cyan">{accuracyPercent}%</span>
+            </div>
+            <div className="stat-item">
+              <span className="stat-label">Streak</span>
+              <span className="stat-value stat-amber">
+                <Flame size={15} aria-hidden="true" />
+                {streak}
+              </span>
+            </div>
+          </section>
 
-      {/* Main Flashcard & 4 Choices Component */}
-      <main className="quiz-main">
-        {currentCard ? (
-          <>
-            <Flashcard
-              key={`${currentCard.id}-${shuffleSeed}`}
-              card={currentCard}
-              cardNumber={safeIndex + 1}
-              totalCards={totalCards}
-              selectedOption={userAnswers[currentCard.id]?.selectedIndex}
-              onSelectOption={handleSelectOption}
-            />
+          {/* Toolbar: Section Filter, Search, & Shuffle Controls */}
+          <section
+            className="revision-toolbar"
+            aria-label="Revision controls and filters"
+          >
+            <div className="toolbar-row">
+              <div className="filter-group">
+                <label htmlFor="topic-select" className="visually-hidden">
+                  Filter by Section or Topic
+                </label>
+                <select
+                  id="topic-select"
+                  className="topic-select"
+                  value={selectedTopic}
+                  onChange={(e) => {
+                    setSelectedTopic(e.target.value);
+                    setCurrentIndex(0);
+                  }}
+                >
+                  {deckTopics.map((topic) => (
+                    <option key={topic} value={topic}>
+                      {topic}
+                    </option>
+                  ))}
+                </select>
+              </div>
 
-            {/* Navigation Controls */}
-            <div className="controls">
+              <div className="search-group">
+                <Search size={15} className="search-icon" aria-hidden="true" />
+                <label htmlFor="concept-search" className="visually-hidden">
+                  Search questions or concepts
+                </label>
+                <input
+                  id="concept-search"
+                  type="search"
+                  className="search-input"
+                  placeholder="Search questions, concepts, or keywords..."
+                  value={searchQuery}
+                  onChange={(e) => {
+                    setSearchQuery(e.target.value);
+                    setCurrentIndex(0);
+                  }}
+                />
+              </div>
+            </div>
+
+            <div className="toolbar-toggles">
               <button
                 type="button"
-                className="nav-btn"
-                onClick={handlePrev}
-                disabled={isFirstCard}
-              >
-                <ChevronLeft size={18} aria-hidden="true" />
-                Previous
-              </button>
-
-              <button
-                type="button"
-                className="restart-btn"
+                className="toggle-chip active"
                 onClick={handleReshuffle}
               >
-                <RotateCcw size={16} aria-hidden="true" />
-                Reset &amp; Reshuffle
+                <Shuffle size={14} aria-hidden="true" />
+                Reshuffle Random Order
               </button>
 
               <button
                 type="button"
-                className="nav-btn primary"
-                onClick={handleNext}
-                disabled={isLastCard}
+                className={`toggle-chip ${!isShuffled ? 'active' : ''}`}
+                onClick={() => {
+                  setIsShuffled((prev) => !prev);
+                  setCurrentIndex(0);
+                }}
+                aria-pressed={!isShuffled}
               >
-                Next
-                <ChevronRight size={18} aria-hidden="true" />
+                <ListOrdered size={14} aria-hidden="true" />
+                {isShuffled ? 'Switch to Original Order' : 'In Original Order'}
               </button>
+
+              {totalMissed > 0 && (
+                <button
+                  type="button"
+                  className={`toggle-chip missed-chip ${showMissedOnly ? 'active' : ''}`}
+                  onClick={() => {
+                    setShowMissedOnly((prev) => !prev);
+                    setCurrentIndex(0);
+                  }}
+                  aria-pressed={showMissedOnly}
+                >
+                  <AlertCircle size={14} aria-hidden="true" />
+                  Review Missed ({totalMissed})
+                </button>
+              )}
             </div>
-          </>
-        ) : (
-          <div className="empty-deck">
-            <p>No revision cards match your current filter.</p>
+          </section>
+
+          {/* Progress Bar */}
+          <div className="progress-section">
+            <div className="progress-info">
+              <span>
+                Deck Progress ({totalCards > 0 ? safeIndex + 1 : 0} of {totalCards})
+              </span>
+              <span className="progress-value">{progressPercent}%</span>
+            </div>
+            <div className="progress-track">
+              <div
+                className="progress-fill"
+                style={{ width: `${progressPercent}%` }}
+              />
+            </div>
+          </div>
+
+          {/* Main Flashcard & 4 Choices Component */}
+          <main className="quiz-main">
+            {currentCard ? (
+              <>
+                <Flashcard
+                  key={`${currentCard.id}-${shuffleSeed}`}
+                  card={currentCard}
+                  cardNumber={safeIndex + 1}
+                  totalCards={totalCards}
+                  selectedOption={userAnswers[currentCard.id]?.selectedIndex}
+                  onSelectOption={handleSelectOption}
+                />
+
+                {/* Navigation Controls */}
+                <div className="controls">
+                  <button
+                    type="button"
+                    className="nav-btn"
+                    onClick={handlePrev}
+                    disabled={isFirstCard}
+                  >
+                    <ChevronLeft size={18} aria-hidden="true" />
+                    Previous
+                  </button>
+
+                  <button
+                    type="button"
+                    className="restart-btn"
+                    onClick={handleReshuffle}
+                  >
+                    <RotateCcw size={16} aria-hidden="true" />
+                    Reset &amp; Reshuffle
+                  </button>
+
+                  <button
+                    type="button"
+                    className="nav-btn primary"
+                    onClick={handleNext}
+                    disabled={isLastCard}
+                  >
+                    Next
+                    <ChevronRight size={18} aria-hidden="true" />
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="empty-deck">
+                <p>No revision cards match your current filter.</p>
+                <button
+                  type="button"
+                  className="nav-btn primary"
+                  onClick={() => {
+                    setSelectedTopic('All Sections');
+                    setSearchQuery('');
+                    setShowMissedOnly(false);
+                    setCurrentIndex(0);
+                  }}
+                >
+                  Show All {deckQuestions.length} Cards
+                </button>
+              </div>
+            )}
+          </main>
+        </>
+      ) : (
+        /* Welcome / Empty State when no study material has been uploaded yet */
+        <main className="welcome-empty-card">
+          <div className="welcome-icon-circle" aria-hidden="true">
+            <Upload size={32} />
+          </div>
+          <h2>Send In Any Study Material to Start</h2>
+          <p className="welcome-description">
+            Upload a <strong>PDF</strong>, <strong>Word document (.docx)</strong>,
+            or <strong>Text file</strong>—or paste your lecture notes from any
+            subject. Gemini AI will generate a comprehensive, shuffled 4-choice
+            revision quiz covering every area of your material.
+          </p>
+          <div className="welcome-actions">
             <button
               type="button"
-              className="nav-btn primary"
-              onClick={() => {
-                setSelectedTopic('All Topics');
-                setSearchQuery('');
-                setShowMissedOnly(false);
-                setCurrentIndex(0);
-              }}
+              className="nav-btn primary welcome-primary-btn"
+              onClick={handleOpenAiModal}
             >
-              Show All {allQuestions.length} Cards
+              <Sparkles size={18} aria-hidden="true" />
+              Upload or Paste Your Study Material
+            </button>
+            <button
+              type="button"
+              className="nav-btn"
+              onClick={handleLoadSampleDeck}
+            >
+              <BookOpen size={17} aria-hidden="true" />
+              Try Sample Deck (90 Cards)
             </button>
           </div>
-        )}
-      </main>
+        </main>
+      )}
 
       {/* Native <dialog> Modal for Gemini AI Notes Generation */}
       <NotesGeneratorModal
         dialogRef={dialogRef}
-        onQuestionsGenerated={handleQuestionsGenerated}
-        customCount={customQuestions.length}
-        onClearCustomCards={handleClearCustomCards}
+        onDeckCreated={handleDeckCreated}
+        customDeckCount={savedDecks.length}
+        onClearAllDecks={handleClearAllDecks}
       />
 
       {/* Study Tips Footer */}
       <footer className="concept-callout">
-        <h4>💡 QuizFlip Features &amp; Shortcuts:</h4>
+        <h4>💡 How QuizFlip Works:</h4>
         <ul>
           <li>
-            <strong>Full Course Coverage (90+ Cards Shuffled):</strong> Covers
-            every sub-topic across all 14 weeks of BBM 122 in a randomized
-            sequence (both card order and A/B/C/D option order are shuffled).
+            <strong>Works With Any Course or Document:</strong> Upload any{' '}
+            <code>.pdf</code>, Word (<code>.docx</code>), or <code>.txt</code>{' '}
+            handout—or paste raw notes—to generate 30–60+ questions touching on
+            every section of your material.
           </li>
           <li>
-            <strong>AI Notes Generator (30–60+ Questions):</strong> Click{' '}
-            <code>+ AI Add Your Notes</code> to upload a <code>.pdf</code>, Word (
-            <code>.docx</code>), or <code>.txt</code> file and generate a full
-            shuffled question bank touching on every section of your document.
+            <strong>Randomized Active Recall:</strong> Questions and their 4
+            choices (<code>A</code>, <code>B</code>, <code>C</code>, <code>D</code>
+            ) are automatically shuffled into a random sequence every session.
           </li>
           <li>
-            <strong>4-Choice Quiz + Flashcard:</strong> Pick an option (or press keys{' '}
-            <code>1</code>–<code>4</code>) for instant grading, or click the card to
-            flip and read the full study notes.
+            <strong>Flip + Instant Grading:</strong> Pick an option (or press keys{' '}
+            <code>1</code>–<code>4</code>) for instant feedback, or click the
+            card anytime to flip and read the explanation.
           </li>
         </ul>
       </footer>

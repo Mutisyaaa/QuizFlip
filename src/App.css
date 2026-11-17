@@ -1005,3 +1005,117 @@
 .spin-loader {
   animation: spin 0.9s linear infinite;
 }
+
+/* Active Study Material Switcher Bar */
+.deck-switcher-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: rgba(30, 41, 59, 0.55);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+}
+
+.deck-select-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-grow: 1;
+}
+
+.deck-icon {
+  color: var(--accent-cyan);
+  flex-shrink: 0;
+}
+
+.deck-select {
+  width: 100%;
+  min-block-size: 34px;
+  background: transparent;
+  border: none;
+  color: #ffffff;
+  font-weight: 600;
+  font-size: 13.5px;
+  cursor: pointer;
+}
+
+.deck-select option {
+  background: var(--bg-card);
+  color: var(--text-main);
+}
+
+.delete-deck-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  min-block-size: 32px;
+  padding: 5px 10px;
+  border-radius: 7px;
+  border: 1px solid rgba(244, 63, 94, 0.35);
+  background: rgba(244, 63, 94, 0.1);
+  color: #fda4af;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.delete-deck-btn:hover {
+  background: rgba(244, 63, 94, 0.22);
+}
+
+/* Welcome / Empty State Card */
+.welcome-empty-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 42px 28px;
+  box-shadow: var(--shadow-card);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.welcome-icon-circle {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: rgba(99, 102, 241, 0.18);
+  border: 1px solid rgba(99, 102, 241, 0.4);
+  color: #a5b4fc;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.welcome-empty-card h2 {
+  font-size: 22px;
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.welcome-description {
+  max-width: 520px;
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+.welcome-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.welcome-primary-btn {
+  background: linear-gradient(135deg, #4f46e5, #0284c7);
+  border-color: #38bdf8;
+  font-weight: 600;
+}
