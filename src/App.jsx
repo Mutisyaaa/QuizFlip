@@ -224,7 +224,7 @@ function App() {
   );
 
   const handleWrittenGraded = useCallback(
-    (gradeResult) => {
+    (gradeResult, isUpdate = false) => {
       if (!currentCard) return;
       setUserAnswers((prev) => ({
         ...prev,
@@ -233,7 +233,9 @@ function App() {
           writtenResult: gradeResult
         }
       }));
-      setStreak((prev) => (gradeResult.passed ? prev + 1 : 0));
+      if (!isUpdate) {
+        setStreak((prev) => (gradeResult.passed ? prev + 1 : 0));
+      }
     },
     [currentCard]
   );

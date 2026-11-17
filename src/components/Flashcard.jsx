@@ -10,7 +10,10 @@ import {
   Loader2,
   Sparkles
 } from 'lucide-react';
-import { gradeWrittenAnswer } from '../services/geminiGenerator';
+import {
+  computeInstantGrade,
+  gradeWrittenAnswer
+} from '../services/geminiGenerator';
 
 const OPTION_LETTERS = ['A', 'B', 'C', 'D'];
 
@@ -23,7 +26,7 @@ const OPTION_LETTERS = ['A', 'B', 'C', 'D'];
  * @param {'choices'|'written'} props.quizMode - 'choices' (4 options) or 'written' (short answer)
  * @param {Object|undefined} props.savedAnswer - { selectedIndex?, isCorrect, writtenResult? }
  * @param {Function} props.onSelectOption - Callback (optionIndex, isCorrect) => void
- * @param {Function} props.onWrittenGraded - Callback (gradeResult) => void
+ * @param {Function} props.onWrittenGraded - Callback (gradeResult, isUpdate) => void
  */
 export function Flashcard({
   card,
@@ -38,7 +41,7 @@ export function Flashcard({
   const [writtenText, setWrittenText] = useState(
     () => savedAnswer?.writtenResult?.userResponse || ''
   );
-  const [isGrading, setIsGrading] = useState(false);
+  const [isRefiningAi, setIsRefiningAi] = useState(false);
 
   const activeOptions = card.options;
   const activeCorrectIndex = card.correctIndex;
@@ -63,18 +66,28 @@ export function Flashcard({
 
   const handleWrittenSubmit = async (e) => {
     if (e) e.preventDefault();
-    if (hasAnsweredWritten || isGrading || !writtenText.trim()) return;
+    if (hasAnsweredWritten || !writtenText.trim()) return;
 
-    setIsGrading(true);
+    // 1. Show instant local grade in <5ms so the user never waits
+    const instantResult = computeInstantGrade({
+      referenceAnswer: card.answer,
+      userResponse: writtenText
+    });
+    onWrittenGraded(instantResult, false);
+
+    // 2. Refine in the background with ultra-fast gemini-3.5-flash-lite (thinking_level: minimal)
+    setIsRefiningAi(true);
     try {
-      const result = await gradeWrittenAnswer({
+      const aiResult = await gradeWrittenAnswer({
         question: card.question,
         referenceAnswer: card.answer,
         userResponse: writtenText
       });
-      onWrittenGraded(result);
+      if (aiResult.isAiRefined) {
+        onWrittenGraded(aiResult, true);
+      }
     } finally {
-      setIsGrading(false);
+      setIsRefiningAi(false);
     }
   };
 
@@ -256,7 +269,7 @@ export function Flashcard({
               className="written-textarea"
               rows={3}
               aria-describedby="written-shortcut-hint"
-              placeholder="Type your answer here... Gemini AI will grade it out of 10 and highlight any missing points."
+              placeholder="Type your answer here... Get an instant score out of 10 + AI feedback."
               value={writtenText}
               onChange={(e) => setWrittenText(e.target.value)}
               onKeyDown={(e) => {
@@ -264,7 +277,7 @@ export function Flashcard({
                   handleWrittenSubmit(e);
                 }
               }}
-              disabled={hasAnsweredWritten || isGrading}
+              disabled={hasAnsweredWritten}
             />
 
             {!hasAnsweredWritten && (
@@ -272,29 +285,16 @@ export function Flashcard({
                 <button
                   type="submit"
                   className="nav-btn primary grade-answer-btn"
-                  disabled={isGrading || !writtenText.trim()}
+                  disabled={!writtenText.trim()}
                 >
-                  {isGrading ? (
-                    <>
-                      <Loader2
-                        size={16}
-                        className="spin-loader"
-                        aria-hidden="true"
-                      />
-                      Grading with Gemini AI...
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles size={16} aria-hidden="true" />
-                      Grade My Answer
-                    </>
-                  )}
+                  <Sparkles size={16} aria-hidden="true" />
+                  Grade My Answer
                 </button>
               </div>
             )}
           </form>
 
-          {/* AI Examiner Grading Feedback */}
+          {/* Instant + AI Examiner Grading Feedback */}
           <div aria-live="polite">
             {writtenResult && (
               <div
@@ -311,9 +311,21 @@ export function Flashcard({
                     )}
                     <span>{writtenResult.verdict}</span>
                   </div>
-                  <span className="written-score-pill">
-                    Score: {writtenResult.score} / 10
-                  </span>
+                  <div className="grade-badges-right">
+                    {isRefiningAi && (
+                      <span className="refining-pill">
+                        <Loader2
+                          size={12}
+                          className="spin-loader"
+                          aria-hidden="true"
+                        />
+                        AI refining...
+                      </span>
+                    )}
+                    <span className="written-score-pill">
+                      Score: {writtenResult.score} / 10
+                    </span>
+                  </div>
                 </div>
 
                 <p className="written-feedback-text">{writtenResult.feedback}</p>

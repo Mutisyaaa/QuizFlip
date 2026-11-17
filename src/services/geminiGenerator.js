@@ -1,5 +1,16 @@
 import { GoogleGenAI } from '@google/genai';
 
+let cachedClient = null;
+let cachedApiKey = '';
+
+function getGenAIClient(apiKey) {
+  if (!cachedClient || cachedApiKey !== apiKey) {
+    cachedClient = new GoogleGenAI({ apiKey });
+    cachedApiKey = apiKey;
+  }
+  return cachedClient;
+}
+
 const QUIZ_RESPONSE_SCHEMA = {
   type: 'object',
   properties: {
@@ -51,24 +62,107 @@ const WRITTEN_GRADE_SCHEMA = {
   properties: {
     score: {
       type: 'integer',
-      description: 'Marks awarded from 0 to 10 based on accuracy and completeness compared to the study notes.'
+      description: 'Marks awarded from 0 to 10.'
     },
     verdict: {
       type: 'string',
-      description: 'Short label such as "Excellent!", "Good (Partially Correct)", or "Needs Review".'
+      description: 'Short label: "Excellent!", "Good (Passed)", or "Needs Review".'
     },
     feedback: {
       type: 'string',
-      description: '1-2 sentences praising what the student got right or correcting any misconception.'
+      description: '1 brief sentence on what the student got right or missed.'
     },
     missedPoints: {
       type: 'array',
-      description: 'Short bullet points from the study notes that the student omitted (empty array if score is 9 or 10).',
+      description: 'Up to 3 brief bullet points from the reference answer omitted by the student.',
       items: { type: 'string' }
     }
   },
   required: ['score', 'verdict', 'feedback', 'missedPoints']
 };
+
+const STOP_WORDS = new Set([
+  'the', 'and', 'for', 'that', 'this', 'with', 'from', 'are', 'was', 'were',
+  'have', 'has', 'had', 'not', 'but', 'what', 'which', 'who', 'whom', 'into',
+  'they', 'their', 'them', 'there', 'been', 'being', 'also', 'such', 'can',
+  'will', 'would', 'should', 'could', 'about', 'where', 'when', 'while', 'then',
+  'than', 'some', 'more', 'most', 'other', 'only', 'very', 'just', 'like'
+]);
+
+/**
+ * Computes an instant (<5ms) local grade by comparing key concepts and clauses
+ * in the student's response against the reference study notes answer.
+ */
+export function computeInstantGrade({ referenceAnswer, userResponse }) {
+  const trimmedUser = (userResponse || '').trim();
+  const userLower = trimmedUser.toLowerCase();
+
+  // Extract meaningful stems/keywords from reference answer
+  const extractTerms = (text) =>
+    text
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length > 3 && !STOP_WORDS.has(w));
+
+  const uniqueRefWords = [...new Set(extractTerms(referenceAnswer))];
+  const matchedWords = uniqueRefWords.filter((w) => {
+    const stem = w.length > 5 ? w.slice(0, -2) : w;
+    return userLower.includes(stem);
+  });
+
+  // Split reference answer into key clauses/points to spot missed points immediately
+  const clauses = referenceAnswer
+    .split(/[.;•\n]+/)
+    .map((c) => c.trim())
+    .filter((c) => c.length > 12);
+
+  const missedClauses = [];
+  let matchedClauseCount = 0;
+
+  clauses.forEach((clause) => {
+    const clauseTerms = extractTerms(clause);
+    if (clauseTerms.length === 0) return;
+    const hits = clauseTerms.filter((w) => {
+      const stem = w.length > 5 ? w.slice(0, -2) : w;
+      return userLower.includes(stem);
+    });
+    if (hits.length / clauseTerms.length >= 0.35) {
+      matchedClauseCount++;
+    } else if (missedClauses.length < 3) {
+      missedClauses.push(clause);
+    }
+  });
+
+  const wordRatio =
+    uniqueRefWords.length > 0 ? matchedWords.length / uniqueRefWords.length : 0.5;
+  const clauseRatio =
+    clauses.length > 0 ? matchedClauseCount / clauses.length : wordRatio;
+
+  const combinedRatio = Math.max(wordRatio * 1.35, clauseRatio * 1.15);
+  const score = Math.min(10, Math.max(1, Math.round(combinedRatio * 10)));
+  const passed = score >= 6;
+
+  return {
+    score,
+    passed,
+    verdict:
+      score >= 8
+        ? 'Excellent!'
+        : score >= 6
+          ? 'Good (Passed)'
+          : 'Needs Review',
+    feedback:
+      score >= 8
+        ? 'Great recall — you captured the core points from the study notes.'
+        : score >= 6
+          ? 'Good effort! You got the main idea, with a few extra details to review below.'
+          : 'You missed several key concepts from the notes. Review the breakdown below.',
+    missedPoints: score >= 9 ? [] : missedClauses,
+    userResponse: trimmedUser,
+    isAiRefined: false
+  };
+}
 
 /**
  * Generates 4-choice revision flashcards from any study notes or attached PDF document
@@ -102,7 +196,7 @@ export async function generateQuestionsFromNotes({
     );
   }
 
-  const client = new GoogleGenAI({ apiKey: resolvedKey });
+  const client = getGenAIClient(resolvedKey);
 
   const isComprehensive = count === 'comprehensive' || Number(count) <= 0;
   const countInstruction = isComprehensive
@@ -152,6 +246,10 @@ export async function generateQuestionsFromNotes({
     model: 'gemini-4-hydrogen',
     system_instruction: systemInstruction,
     input: hasPdf ? inputBlocks : promptText,
+    store: false,
+    generation_config: {
+      thinking_level: 'low'
+    },
     response_format: {
       type: 'text',
       mime_type: 'application/json',
@@ -207,14 +305,8 @@ export async function generateQuestionsFromNotes({
 }
 
 /**
- * Grades a student's written short answer against the question and reference study notes
- * using Gemini 4 Hydrogen (with a local keyword fallback if offline).
- *
- * @param {Object} params
- * @param {string} params.question - The question prompt
- * @param {string} params.referenceAnswer - The official study note explanation
- * @param {string} params.userResponse - The student's typed answer
- * @returns {Promise<{ score: number, passed: boolean, verdict: string, feedback: string, missedPoints: string[], userResponse: string }>}
+ * Ultra-fast AI grading using `gemini-3.5-flash-lite` with `thinking_level: "minimal"`
+ * and `store: false` for sub-second response times.
  */
 export async function gradeWrittenAnswer({
   question,
@@ -235,21 +327,16 @@ export async function gradeWrittenAnswer({
 
   if (resolvedKey) {
     try {
-      const client = new GoogleGenAI({ apiKey: resolvedKey });
+      const client = getGenAIClient(resolvedKey);
       const interaction = await client.interactions.create({
-        model: 'gemini-4-hydrogen',
-        system_instruction: [
-          'You are a fair, encouraging university examiner grading a short-answer revision question.',
-          'Compare the student\'s written response against the Reference Study Notes Answer.',
-          'Award a score from 0 to 10 based on conceptual understanding (do not require word-for-word memorization if the meaning is right).',
-          'If the student captured the core idea, award at least 6/10.',
-          'List any important missing points from the Reference Study Notes in "missedPoints" (keep each bullet brief).'
-        ].join('\n'),
-        input: [
-          `Question: ${question}`,
-          `Reference Study Notes Answer: ${referenceAnswer}`,
-          `Student's Written Answer: ${trimmedUser}`
-        ].join('\n\n'),
+        model: 'gemini-3.5-flash-lite',
+        store: false,
+        generation_config: {
+          thinking_level: 'minimal'
+        },
+        system_instruction:
+          'Grade the student answer from 0 to 10 against the Reference Answer based on meaning (6+ passes). Keep feedback to 1 brief sentence and list up to 3 short missed points.',
+        input: `Q: ${question}\nReference: ${referenceAnswer}\nStudent: ${trimmedUser}`,
         response_format: {
           type: 'text',
           mime_type: 'application/json',
@@ -275,41 +362,13 @@ export async function gradeWrittenAnswer({
         missedPoints: Array.isArray(parsed.missedPoints)
           ? parsed.missedPoints
           : [],
-        userResponse: trimmedUser
+        userResponse: trimmedUser,
+        isAiRefined: true
       };
     } catch {
-      // Fall through to local keyword grading if network/API fails
+      // Fall back to instant grade if network/API fails
     }
   }
 
-  // Offline fallback: keyword overlap scoring
-  const stopWords = new Set([
-    'the', 'and', 'for', 'that', 'this', 'with', 'from', 'are', 'was', 'were',
-    'have', 'has', 'had', 'not', 'but', 'what', 'which', 'who', 'whom', 'into',
-    'they', 'their', 'them', 'there', 'been', 'being', 'also', 'such', 'can'
-  ]);
-  const refWords = referenceAnswer
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter((w) => w.length > 3 && !stopWords.has(w));
-  const uniqueRefWords = [...new Set(refWords)];
-  const userLower = trimmedUser.toLowerCase();
-  const matched = uniqueRefWords.filter((w) => userLower.includes(w));
-  const ratio =
-    uniqueRefWords.length > 0 ? matched.length / uniqueRefWords.length : 0.5;
-  const score = Math.min(10, Math.max(1, Math.round(ratio * 12)));
-
-  return {
-    score,
-    passed: score >= 6,
-    verdict:
-      score >= 8 ? 'Strong Answer!' : score >= 6 ? 'Good Effort' : 'Needs Review',
-    feedback:
-      score >= 6
-        ? 'You covered several key concepts from the study notes.'
-        : 'Your answer missed several key terms from the study notes. Review the full explanation below.',
-    missedPoints: [],
-    userResponse: trimmedUser
-  };
+  return computeInstantGrade({ referenceAnswer, userResponse: trimmedUser });
 }
