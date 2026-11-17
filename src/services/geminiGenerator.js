@@ -46,17 +46,33 @@ const QUIZ_RESPONSE_SCHEMA = {
   required: ['deckTitle', 'questions']
 };
 
+const WRITTEN_GRADE_SCHEMA = {
+  type: 'object',
+  properties: {
+    score: {
+      type: 'integer',
+      description: 'Marks awarded from 0 to 10 based on accuracy and completeness compared to the study notes.'
+    },
+    verdict: {
+      type: 'string',
+      description: 'Short label such as "Excellent!", "Good (Partially Correct)", or "Needs Review".'
+    },
+    feedback: {
+      type: 'string',
+      description: '1-2 sentences praising what the student got right or correcting any misconception.'
+    },
+    missedPoints: {
+      type: 'array',
+      description: 'Short bullet points from the study notes that the student omitted (empty array if score is 9 or 10).',
+      items: { type: 'string' }
+    }
+  },
+  required: ['score', 'verdict', 'feedback', 'missedPoints']
+};
+
 /**
  * Generates 4-choice revision flashcards from any study notes or attached PDF document
  * using Gemini 4 Hydrogen and the Interactions API structured output schema.
- *
- * @param {Object} params
- * @param {string} [params.notesText] - Raw study notes pasted or extracted from .docx/.txt
- * @param {{ name: string, base64Data: string } | null} [params.pdfDocument] - Optional PDF document
- * @param {string} [params.topicName] - Optional subject/deck label for the generated cards
- * @param {number|string} [params.count='comprehensive'] - Number of questions or 'comprehensive'
- * @param {string} [params.apiKey] - Gemini API key
- * @returns {Promise<{ deckTitle: string, questions: Array }>}
  */
 export async function generateQuestionsFromNotes({
   notesText = '',
@@ -187,5 +203,113 @@ export async function generateQuestionsFromNotes({
   return {
     deckTitle,
     questions
+  };
+}
+
+/**
+ * Grades a student's written short answer against the question and reference study notes
+ * using Gemini 4 Hydrogen (with a local keyword fallback if offline).
+ *
+ * @param {Object} params
+ * @param {string} params.question - The question prompt
+ * @param {string} params.referenceAnswer - The official study note explanation
+ * @param {string} params.userResponse - The student's typed answer
+ * @returns {Promise<{ score: number, passed: boolean, verdict: string, feedback: string, missedPoints: string[], userResponse: string }>}
+ */
+export async function gradeWrittenAnswer({
+  question,
+  referenceAnswer,
+  userResponse
+}) {
+  const trimmedUser = (userResponse || '').trim();
+  if (!trimmedUser) {
+    throw new Error('Please write an answer before submitting.');
+  }
+
+  const savedCustomKey = localStorage.getItem('quizflip_gemini_api_key') || '';
+  const resolvedKey = (
+    savedCustomKey ||
+    import.meta.env.VITE_GEMINI_API_KEY ||
+    ''
+  ).trim();
+
+  if (resolvedKey) {
+    try {
+      const client = new GoogleGenAI({ apiKey: resolvedKey });
+      const interaction = await client.interactions.create({
+        model: 'gemini-4-hydrogen',
+        system_instruction: [
+          'You are a fair, encouraging university examiner grading a short-answer revision question.',
+          'Compare the student\'s written response against the Reference Study Notes Answer.',
+          'Award a score from 0 to 10 based on conceptual understanding (do not require word-for-word memorization if the meaning is right).',
+          'If the student captured the core idea, award at least 6/10.',
+          'List any important missing points from the Reference Study Notes in "missedPoints" (keep each bullet brief).'
+        ].join('\n'),
+        input: [
+          `Question: ${question}`,
+          `Reference Study Notes Answer: ${referenceAnswer}`,
+          `Student's Written Answer: ${trimmedUser}`
+        ].join('\n\n'),
+        response_format: {
+          type: 'text',
+          mime_type: 'application/json',
+          schema: WRITTEN_GRADE_SCHEMA
+        }
+      });
+
+      const parsed = JSON.parse(interaction.output_text || '{}');
+      const score = Math.max(0, Math.min(10, Number(parsed.score) || 0));
+      return {
+        score,
+        passed: score >= 6,
+        verdict:
+          parsed.verdict ||
+          (score >= 8
+            ? 'Excellent!'
+            : score >= 6
+              ? 'Good (Passed)'
+              : 'Needs Review'),
+        feedback:
+          parsed.feedback ||
+          'Compare your response with the reference study notes below.',
+        missedPoints: Array.isArray(parsed.missedPoints)
+          ? parsed.missedPoints
+          : [],
+        userResponse: trimmedUser
+      };
+    } catch {
+      // Fall through to local keyword grading if network/API fails
+    }
+  }
+
+  // Offline fallback: keyword overlap scoring
+  const stopWords = new Set([
+    'the', 'and', 'for', 'that', 'this', 'with', 'from', 'are', 'was', 'were',
+    'have', 'has', 'had', 'not', 'but', 'what', 'which', 'who', 'whom', 'into',
+    'they', 'their', 'them', 'there', 'been', 'being', 'also', 'such', 'can'
+  ]);
+  const refWords = referenceAnswer
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 3 && !stopWords.has(w));
+  const uniqueRefWords = [...new Set(refWords)];
+  const userLower = trimmedUser.toLowerCase();
+  const matched = uniqueRefWords.filter((w) => userLower.includes(w));
+  const ratio =
+    uniqueRefWords.length > 0 ? matched.length / uniqueRefWords.length : 0.5;
+  const score = Math.min(10, Math.max(1, Math.round(ratio * 12)));
+
+  return {
+    score,
+    passed: score >= 6,
+    verdict:
+      score >= 8 ? 'Strong Answer!' : score >= 6 ? 'Good Effort' : 'Needs Review',
+    feedback:
+      score >= 6
+        ? 'You covered several key concepts from the study notes.'
+        : 'Your answer missed several key terms from the study notes. Review the full explanation below.',
+    missedPoints: [],
+    userResponse: trimmedUser
   };
 }

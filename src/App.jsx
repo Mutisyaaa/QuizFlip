@@ -17,7 +17,9 @@ import {
   Upload,
   FolderOpen,
   Trash2,
-  BookOpen
+  BookOpen,
+  PenLine,
+  ListChecks
 } from 'lucide-react';
 import './App.css';
 
@@ -129,9 +131,10 @@ function App() {
     return ['All Sections', ...unique];
   }, [deckQuestions]);
 
-  // Filters & Shuffle State (Shuffled in a random sequence by default)
+  // Filters, Answer Mode ('choices' vs 'written'), & Shuffle State
   const [selectedTopic, setSelectedTopic] = useState('All Sections');
   const [searchQuery, setSearchQuery] = useState('');
+  const [quizMode, setQuizMode] = useState('choices');
   const [isShuffled, setIsShuffled] = useState(true);
   const [shuffleSeed, setShuffleSeed] = useState(() =>
     Math.floor(Math.random() * 1000000) + 1
@@ -139,7 +142,7 @@ function App() {
   const [showMissedOnly, setShowMissedOnly] = useState(false);
   const [currentIndex, setCurrentIndex] = useState(0);
 
-  // User answers dictionary: { [cardId]: { selectedIndex: number, isCorrect: boolean } }
+  // User answers dictionary: { [cardId]: { selectedIndex?, isCorrect: boolean, writtenResult? } }
   const [userAnswers, setUserAnswers] = useState({});
   const [streak, setStreak] = useState(0);
 
@@ -216,6 +219,21 @@ function App() {
         [currentCard.id]: { selectedIndex: optionIndex, isCorrect }
       }));
       setStreak((prev) => (isCorrect ? prev + 1 : 0));
+    },
+    [currentCard]
+  );
+
+  const handleWrittenGraded = useCallback(
+    (gradeResult) => {
+      if (!currentCard) return;
+      setUserAnswers((prev) => ({
+        ...prev,
+        [currentCard.id]: {
+          isCorrect: gradeResult.passed,
+          writtenResult: gradeResult
+        }
+      }));
+      setStreak((prev) => (gradeResult.passed ? prev + 1 : 0));
     },
     [currentCard]
   );
@@ -308,7 +326,7 @@ function App() {
     dialogRef.current?.close();
   };
 
-  // Keyboard shortcuts for fast revision (1-4 for options, Left/Right arrows for navigation)
+  // Keyboard shortcuts for fast revision (1-4 for options in choices mode, Left/Right arrows)
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (
@@ -324,9 +342,13 @@ function App() {
         handleNext();
       } else if (e.key === 'ArrowLeft') {
         handlePrev();
-      } else if (['1', '2', '3', '4'].includes(e.key) && currentCard) {
+      } else if (
+        quizMode === 'choices' &&
+        ['1', '2', '3', '4'].includes(e.key) &&
+        currentCard
+      ) {
         const idx = Number(e.key) - 1;
-        if (userAnswers[currentCard.id] === undefined) {
+        if (userAnswers[currentCard.id]?.selectedIndex === undefined) {
           handleSelectOption(idx, idx === currentCard.correctIndex);
         }
       }
@@ -334,7 +356,14 @@ function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentCard, userAnswers, handleNext, handlePrev, handleSelectOption]);
+  }, [
+    currentCard,
+    userAnswers,
+    quizMode,
+    handleNext,
+    handlePrev,
+    handleSelectOption
+  ]);
 
   return (
     <div className="app-shell">
@@ -356,7 +385,7 @@ function App() {
         <h1>QuizFlip</h1>
         <p className="subtitle">
           Turn any PDF, Word document, or study notes into a shuffled 4-choice
-          revision quiz &amp; flashcard deck.
+          or written short-answer revision quiz.
         </p>
       </header>
 
@@ -428,7 +457,7 @@ function App() {
             </div>
           </section>
 
-          {/* Toolbar: Section Filter, Search, & Shuffle Controls */}
+          {/* Toolbar: Section Filter, Search, & Mode/Shuffle Controls */}
           <section
             className="revision-toolbar"
             aria-label="Revision controls and filters"
@@ -477,11 +506,31 @@ function App() {
             <div className="toolbar-toggles">
               <button
                 type="button"
-                className="toggle-chip active"
+                className={`toggle-chip ${quizMode === 'choices' ? 'active' : ''}`}
+                onClick={() => setQuizMode('choices')}
+                aria-pressed={quizMode === 'choices'}
+              >
+                <ListChecks size={14} aria-hidden="true" />
+                4-Choice Mode
+              </button>
+
+              <button
+                type="button"
+                className={`toggle-chip ${quizMode === 'written' ? 'active' : ''}`}
+                onClick={() => setQuizMode('written')}
+                aria-pressed={quizMode === 'written'}
+              >
+                <PenLine size={14} aria-hidden="true" />
+                Written Short-Answer Mode
+              </button>
+
+              <button
+                type="button"
+                className="toggle-chip"
                 onClick={handleReshuffle}
               >
                 <Shuffle size={14} aria-hidden="true" />
-                Reshuffle Random Order
+                Reshuffle Order
               </button>
 
               <button
@@ -494,7 +543,7 @@ function App() {
                 aria-pressed={!isShuffled}
               >
                 <ListOrdered size={14} aria-hidden="true" />
-                {isShuffled ? 'Switch to Original Order' : 'In Original Order'}
+                {isShuffled ? 'Original Order' : 'In Original Order'}
               </button>
 
               {totalMissed > 0 && (
@@ -530,17 +579,19 @@ function App() {
             </div>
           </div>
 
-          {/* Main Flashcard & 4 Choices Component */}
+          {/* Main Flashcard, 4 Choices, or Written Short-Answer Component */}
           <main className="quiz-main">
             {currentCard ? (
               <>
                 <Flashcard
-                  key={`${currentCard.id}-${shuffleSeed}`}
+                  key={`${currentCard.id}-${shuffleSeed}-${quizMode}`}
                   card={currentCard}
                   cardNumber={safeIndex + 1}
                   totalCards={totalCards}
-                  selectedOption={userAnswers[currentCard.id]?.selectedIndex}
+                  quizMode={quizMode}
+                  savedAnswer={userAnswers[currentCard.id]}
                   onSelectOption={handleSelectOption}
+                  onWrittenGraded={handleWrittenGraded}
                 />
 
                 {/* Navigation Controls */}
@@ -605,7 +656,7 @@ function App() {
             Upload a <strong>PDF</strong>, <strong>Word document (.docx)</strong>,
             or <strong>Text file</strong>—or paste your lecture notes from any
             subject. Gemini AI will generate a comprehensive, shuffled 4-choice
-            revision quiz covering every area of your material.
+            &amp; short-answer revision quiz covering every area of your material.
           </p>
           <div className="welcome-actions">
             <button
@@ -647,14 +698,14 @@ function App() {
             every section of your material.
           </li>
           <li>
-            <strong>Randomized Active Recall:</strong> Questions and their 4
-            choices (<code>A</code>, <code>B</code>, <code>C</code>, <code>D</code>
-            ) are automatically shuffled into a random sequence every session.
+            <strong>4-Choice &amp; Written Short-Answer Modes:</strong> Switch
+            between <code>4-Choice Mode</code> and{' '}
+            <code>Written Short-Answer Mode</code> (where Gemini AI grades your
+            written response out of 10 and highlights missed points).
           </li>
           <li>
-            <strong>Flip + Instant Grading:</strong> Pick an option (or press keys{' '}
-            <code>1</code>–<code>4</code>) for instant feedback, or click the
-            card anytime to flip and read the explanation.
+            <strong>Randomized Active Recall:</strong> Questions and options are
+            automatically shuffled into a random sequence every session.
           </li>
         </ul>
       </footer>
